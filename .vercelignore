@@ -1,0 +1,8 @@
+.env
+.venv/
+data/
+*.db
+tests/
+voice/source/
+__pycache__/
+.pytest_cache/
