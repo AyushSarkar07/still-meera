@@ -1,0 +1,7 @@
+.env
+.venv/
+data/
+*.db
+__pycache__/
+.pytest_cache/
+voice/source/*.pdf
