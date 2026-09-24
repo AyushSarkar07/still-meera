@@ -1,4 +1,4 @@
-"""Minimal Telegram Bot API client (long polling). Uses plain HTTPS via requests."""
+"""Minimal Telegram Bot API client (long polling or webhook). Uses plain HTTPS via requests."""
 from __future__ import annotations
 
 import re
@@ -44,6 +44,16 @@ class TelegramClient:
         if offset is not None:
             params["offset"] = offset
         return self._call("getUpdates", http_timeout=timeout + 15, **params)
+
+    def set_webhook(self, url: str, secret_token: str) -> None:
+        self._call("setWebhook", url=url, secret_token=secret_token,
+                   allowed_updates=["channel_post"], max_connections=5)
+
+    def delete_webhook(self) -> None:
+        self._call("deleteWebhook")
+
+    def get_webhook_info(self) -> dict:
+        return self._call("getWebhookInfo")
 
     def send_message(self, chat_id: int, text: str) -> dict:
         # Plain text (no parse_mode) so drafts copy cleanly and never fail on markup.

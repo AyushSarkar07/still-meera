@@ -7,7 +7,7 @@ import logging
 import sys
 import time
 
-from .config import Config, ConfigError
+from .config import WEBHOOK_PATH, Config, ConfigError
 
 
 def cmd_run(cfg: Config) -> int:
@@ -28,7 +28,11 @@ def cmd_run(cfg: Config) -> int:
     except TelegramError as exc:
         print(f"Telegram check failed: {exc}")
         return 1
-    store = Store(cfg.db_path)
+    if tg.get_webhook_info().get("url"):
+        print("A webhook is set, so the Vercel deployment is receiving the posts. Telegram does not allow "
+              "polling while a webhook exists. To run locally instead: python -m still_meera delete-webhook")
+        return 1
+    store = Store(cfg.store_target)
     pipe = Pipeline(cfg, store, tg, GeminiClient(cfg.gemini_api_key, cfg.gemini_model))
     pipe.recover_interrupted()
     print(f"Still Meera running as @{me.get('username')} · watching chat {cfg.telegram_chat_id} · "
@@ -84,9 +88,55 @@ def cmd_find_chat(cfg: Config) -> int:
     return 0
 
 
+def cmd_set_webhook(cfg: Config, base_url: str) -> int:
+    from .telegram_api import TelegramClient, TelegramError
+    if not cfg.telegram_bot_token or not cfg.webhook_secret:
+        print("Set TELEGRAM_BOT_TOKEN and TELEGRAM_WEBHOOK_SECRET in .env first "
+              "(the same secret you set in Vercel).")
+        return 2
+    if not base_url.startswith("https://"):
+        print("Use your deployment's https:// URL, e.g. https://still-meera.vercel.app")
+        return 2
+    url = base_url.rstrip("/") + WEBHOOK_PATH
+    try:
+        TelegramClient(cfg.telegram_bot_token).set_webhook(url, cfg.webhook_secret)
+    except TelegramError as exc:
+        print(exc)
+        return 1
+    print(f"Webhook set: Telegram will now send channel posts to {url}")
+    print("Local 'run' will refuse to start while this is set (use delete-webhook to switch back).")
+    return 0
+
+
+def cmd_webhook_info(cfg: Config) -> int:
+    from .telegram_api import TelegramClient, TelegramError
+    try:
+        info = TelegramClient(cfg.telegram_bot_token).get_webhook_info()
+    except TelegramError as exc:
+        print(exc)
+        return 1
+    print(f"URL:              {info.get('url') or '(none, so polling mode)'}")
+    print(f"Pending updates:  {info.get('pending_update_count', 0)}")
+    if info.get("last_error_message"):
+        when = time.strftime("%Y-%m-%d %H:%M", time.localtime(info.get("last_error_date", 0)))
+        print(f"Last error:       {info['last_error_message']} ({when})")
+    return 0
+
+
+def cmd_delete_webhook(cfg: Config) -> int:
+    from .telegram_api import TelegramClient, TelegramError
+    try:
+        TelegramClient(cfg.telegram_bot_token).delete_webhook()
+    except TelegramError as exc:
+        print(exc)
+        return 1
+    print("Webhook removed. Posts now wait for local 'run' (polling).")
+    return 0
+
+
 def cmd_notes(cfg: Config, status: str | None) -> int:
     from .db import Store
-    store = Store(cfg.db_path)
+    store = Store(cfg.store_target)
     for n in store.list_notes(status):
         t = n.get("triage_json") if isinstance(n.get("triage_json"), dict) else {}
         preview = (n.get("original_text") or n.get("transcript") or "(voice, not transcribed)")[:60]
@@ -97,7 +147,7 @@ def cmd_notes(cfg: Config, status: str | None) -> int:
 
 def cmd_show(cfg: Config, note_id: int) -> int:
     from .db import Store
-    note = Store(cfg.db_path).get_note(note_id)
+    note = Store(cfg.store_target).get_note(note_id)
     if not note:
         print(f"No note #{note_id}")
         return 1
@@ -116,6 +166,10 @@ def main(argv: list[str] | None = None) -> int:
     p_notes.add_argument("--status", help="held | delivered | failed | retry_pending")
     p_show = sub.add_parser("show", help="Show one stored note, including its draft")
     p_show.add_argument("note_id", type=int)
+    p_hook = sub.add_parser("set-webhook", help="Point Telegram at your deployment (e.g. https://x.vercel.app)")
+    p_hook.add_argument("base_url")
+    sub.add_parser("webhook-info", help="Show the current webhook and its last delivery error")
+    sub.add_parser("delete-webhook", help="Remove the webhook so local 'run' (polling) works again")
     p_voice = sub.add_parser("extract-voice", help="Extract the published samples (.txt or .pdf) into voice/references.json")
     p_voice.add_argument("pdf_path", metavar="source_path")
     args = parser.parse_args(argv)
@@ -144,6 +198,12 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "find-chat":
         return cmd_find_chat(cfg)
+    if args.command == "set-webhook":
+        return cmd_set_webhook(cfg, args.base_url)
+    if args.command == "webhook-info":
+        return cmd_webhook_info(cfg)
+    if args.command == "delete-webhook":
+        return cmd_delete_webhook(cfg)
     if args.command == "notes":
         return cmd_notes(cfg, args.status)
     if args.command == "show":

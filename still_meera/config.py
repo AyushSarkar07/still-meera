@@ -5,6 +5,7 @@ Secrets are never printed. Use `describe()` for a safe summary.
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -15,6 +16,9 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 # Product assumption: 6/10 is a starting point, not a validated cut-off.
 # Tune TRIAGE_THRESHOLD in .env after reviewing a few weeks of held notes.
 DEFAULT_THRESHOLD = 6.0
+
+WEBHOOK_PATH = "/telegram/webhook"
+CRON_PATH = "/cron/housekeeping"  # also listed in vercel.json
 
 
 class ConfigError(Exception):
@@ -31,6 +35,9 @@ class Config:
     triage_threshold: float = DEFAULT_THRESHOLD
     db_path: Path = field(default_factory=lambda: PROJECT_ROOT / "data" / "still_meera.db")
     max_attempts: int = 2
+    database_url: str = ""          # postgres://... (serverless); empty = local SQLite file
+    webhook_secret: str = ""        # Telegram sends it back in X-Telegram-Bot-Api-Secret-Token
+    cron_secret: str = ""           # Vercel Cron sends it as "Authorization: Bearer ..."
     news_max_items: int = 5
     news_lookback_days: int = 30
 
@@ -56,6 +63,11 @@ class Config:
 
         chat_id = _int_or_none("TELEGRAM_CHAT_ID")
         db_raw = os.getenv("STILL_MEERA_DB", "").strip()
+        # Vercel's Postgres integrations (e.g. Neon) set one of these.
+        database_url = (os.getenv("DATABASE_URL", "") or os.getenv("POSTGRES_URL", "")).strip()
+        webhook_secret = os.getenv("TELEGRAM_WEBHOOK_SECRET", "").strip()
+        if webhook_secret and not re.fullmatch(r"[A-Za-z0-9_-]{1,256}", webhook_secret):
+            raise ConfigError("TELEGRAM_WEBHOOK_SECRET may only use letters, digits, _ and - (max 256)")
         return cls(
             telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", "").strip(),
             telegram_chat_id=chat_id,
@@ -65,7 +77,15 @@ class Config:
             triage_threshold=threshold,
             db_path=Path(db_raw) if db_raw else PROJECT_ROOT / "data" / "still_meera.db",
             max_attempts=int(os.getenv("MAX_ATTEMPTS", "2") or 2),
+            database_url=database_url,
+            webhook_secret=webhook_secret,
+            cron_secret=os.getenv("CRON_SECRET", "").strip(),
         )
+
+    @property
+    def store_target(self) -> Path | str:
+        """What Store() should open: the Postgres URL if set, else the SQLite file."""
+        return self.database_url or self.db_path
 
     def missing_live_settings(self) -> list[str]:
         missing = []
@@ -92,5 +112,7 @@ class Config:
             f"GEMINI_MODEL:       {self.gemini_model or 'MISSING'}",
             f"TRIAGE_THRESHOLD:   {self.triage_threshold} (product assumption, tune over time)",
             f"MAX_ATTEMPTS:       {self.max_attempts}",
-            f"Database:           {self.db_path}",
+            f"TELEGRAM_WEBHOOK_SECRET: {present(self.webhook_secret)}",
+            f"CRON_SECRET:        {present(self.cron_secret)}",
+            f"Database:           {'Postgres (DATABASE_URL)' if self.database_url else self.db_path}",
         ])

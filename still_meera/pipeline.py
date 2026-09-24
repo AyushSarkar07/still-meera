@@ -5,7 +5,6 @@ from the failed stage and never pays twice for work that already succeeded.
 """
 from __future__ import annotations
 
-import json
 import logging
 import re
 import time
@@ -21,6 +20,7 @@ from .telegram_api import TelegramError
 log = logging.getLogger(__name__)
 
 RETRY_BASE_SECONDS = 60
+STUCK_AFTER_SECONDS = 600  # longer than the serverless function time limit
 COMMAND_RE = re.compile(r"^/(retry|draft|status)(?:@\w+)?\s*(?:note\s*)?#?\s*(\d+)?\s*[.!]?\s*$", re.IGNORECASE)
 HELP_TEXT = ("ℹ️ Still Meera · commands: /draft N (draft held note N), /retry N (retry failed note N), "
              "/status. Anything not starting with / is treated as a new note.")
@@ -109,18 +109,12 @@ class Pipeline:
         return False
 
     def _matches_existing_draft(self, text: str) -> bool:
-        for row in self.store.conn.execute("SELECT draft_json FROM notes WHERE draft_json IS NOT NULL"):
-            try:
-                if json.loads(row["draft_json"]).get("post", "").strip() == text:
-                    return True
-            except (json.JSONDecodeError, AttributeError):
-                continue
-        return False
+        return any(post.strip() == text for post in self.store.draft_posts())
 
     # ------------------------------------------------------------------ commands
     def _handle_command(self, cmd: str, arg: str | None) -> str:
         if cmd == "status":
-            counts = dict(self.store.conn.execute("SELECT status, COUNT(*) FROM notes GROUP BY status").fetchall())
+            counts = self.store.status_counts()
             summary = ", ".join(f"{k}: {v}" for k, v in sorted(counts.items())) or "no notes yet"
             self._send(None, f"ℹ️ Still Meera status · {summary} · threshold {self.cfg.triage_threshold:g}")
             return "command_status"
@@ -244,19 +238,28 @@ class Pipeline:
         return status
 
     # ------------------------------------------------------------------ helpers
-    def run_due_retries(self) -> int:
-        due = self.store.due_retries(self.clock())
-        for note in due:
-            self.process_note(note["id"])
-        return len(due)
+    def run_due_retries(self, limit: int | None = None) -> int:
+        ran = 0
+        for note in self.store.due_retries(self.clock())[:limit]:
+            # Claim first: on serverless, two requests may look at the same due note.
+            if self.store.claim_note(note["id"], Status.RETRY_PENDING, Status.PROCESSING):
+                self.process_note(note["id"])
+                ran += 1
+        return ran
 
     def recover_interrupted(self) -> None:
         """Notes left mid-flight by a crash resume on next start (no attempt is charged)."""
-        self.store.conn.execute(
-            "UPDATE notes SET status=?, next_retry_at=NULL WHERE status IN (?, ?)",
-            (Status.RETRY_PENDING, Status.PROCESSING, Status.RECEIVED),
-        )
-        self.store.conn.commit()
+        self.store.requeue_interrupted()
+
+    def housekeeping(self, retry_limit: int = 3) -> int:
+        """Serverless replacement for the polling loop's background work.
+
+        Notes whose request was killed mid-flight (timeout, crash) are requeued once they
+        have been idle for STUCK_AFTER_SECONDS, then due retries run (a few per call, to
+        stay within the function time limit).
+        """
+        self.store.requeue_interrupted(updated_before=self.clock() - STUCK_AFTER_SECONDS)
+        return self.run_due_retries(limit=retry_limit)
 
     @staticmethod
     def note_text(note: dict) -> str:

@@ -90,6 +90,49 @@ and "Check before publishing". Then try a short voice note.
 .venv/bin/python -m still_meera show 12            # full record incl. transcript and draft
 ```
 
+## Deploy on Vercel (runs without your Mac)
+
+On Vercel the bot doesn't poll. Telegram sends each channel post to a **webhook**
+(`app.py` → `still_meera/web.py`), and notes are stored in **Postgres**, because Vercel's
+disk is wiped between requests. Finish the Mac setup above first so you have the bot
+token and `TELEGRAM_CHAT_ID`. Get the chat ID *before* setting the webhook, because
+`find-chat` uses polling.
+
+1. **Import the repo** in Vercel (Add New → Project). No build settings are needed:
+   Vercel finds `app.py` and installs `requirements.txt`.
+2. **Add a database.** Project → Storage → create a **Neon** Postgres database and connect
+   it to the project. This sets `DATABASE_URL`. The tables are created on first use.
+3. **Set environment variables** (Project → Settings → Environment Variables):
+   `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `GEMINI_API_KEY`, `GEMINI_MODEL`,
+   `TRIAGE_THRESHOLD`, plus two random strings you make up:
+   `TELEGRAM_WEBHOOK_SECRET` and `CRON_SECRET`. To generate one:
+   ```bash
+   python3 -c "import secrets; print(secrets.token_urlsafe(32))"
+   ```
+   Redeploy after adding them.
+4. **Point Telegram at the deployment.** Put the same `TELEGRAM_WEBHOOK_SECRET` in your local
+   `.env`, then:
+   ```bash
+   .venv/bin/python -m still_meera set-webhook https://YOUR-PROJECT.vercel.app
+   .venv/bin/python -m still_meera webhook-info
+   ```
+   Post a test note in the channel. `webhook-info` shows Telegram's last delivery error, if any.
+   Vercel → Logs shows the app side.
+
+**Differences from local mode**
+
+- **Retries.** Notes whose request was cut off, and automatic retries that are due, are picked
+  up after every new post and by a daily Vercel Cron job (`vercel.json`; the Hobby plan allows
+  one run per day). `/retry N` still works any time.
+- **Time limit.** Each post is processed inside one request. That covers download,
+  transcription, triage, news and draft. Check Project → Settings → Functions and make sure the
+  max duration allows at least a minute or two. If Telegram doesn't get a reply in time it resends
+  the post, and the duplicate is ignored.
+- **One mode at a time.** Telegram won't allow polling while a webhook is set, so local
+  `run` refuses to start. To go back to running on your Mac:
+  `.venv/bin/python -m still_meera delete-webhook`. Local mode keeps its own SQLite data.
+  To run `notes`/`show` against the Vercel database instead, set `DATABASE_URL` in `.env`.
+
 ## Offline demo (no credentials, no network, no charges)
 
 ```bash
