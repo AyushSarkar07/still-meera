@@ -38,8 +38,9 @@ class Config:
     database_url: str = ""          # postgres://... (serverless); empty = local SQLite file
     webhook_secret: str = ""        # Telegram sends it back in X-Telegram-Bot-Api-Secret-Token
     cron_secret: str = ""           # Vercel Cron sends it as "Authorization: Bearer ..."
-    news_max_items: int = 5
-    news_lookback_days: int = 30
+    news_max_items: int = 5         # relevant headlines shown per note
+    news_candidates: int = 15       # headlines fetched for Gemini to filter
+    news_lookback_days: int = 7
 
     @classmethod
     def from_env(cls, env_file: Path | None = None) -> "Config":
@@ -77,6 +78,7 @@ class Config:
             triage_threshold=threshold,
             db_path=Path(db_raw) if db_raw else PROJECT_ROOT / "data" / "still_meera.db",
             max_attempts=int(os.getenv("MAX_ATTEMPTS", "2") or 2),
+            news_lookback_days=int(os.getenv("NEWS_LOOKBACK_DAYS", "7") or 7),
             database_url=database_url,
             webhook_secret=webhook_secret,
             cron_secret=os.getenv("CRON_SECRET", "").strip(),

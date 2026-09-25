@@ -85,14 +85,31 @@ def held_message(note_id: int, triage: dict, threshold: float, kind: str) -> str
     return "\n".join(lines)
 
 
-def sources_message(note_id: int, news: list[dict], used_ids: list[int]) -> str | None:
-    used = [news[i] for i in used_ids if 0 <= i < len(news)]
-    if not used:
-        return None
-    lines = [f"🔗 Sources for note #{note_id} (headline metadata only; articles not read by the bot)"]
-    for n, item in enumerate(used, 1):
+def off_topic_message(note_id: int, triage: dict, kind: str) -> str:
+    return "\n".join([
+        f"⏸ Still Meera · note #{note_id} ({kind}) not related",
+        "Score: 0/10. Not about skincare, Skinstinct or your work, so nothing was drafted "
+        "and no news was searched.",
+        f"Why: {triage['reason']}",
+        f"If this was meant as a note, post: /draft {note_id}",
+    ])
+
+
+def news_message(note_id: int, news_state: dict, used_ids: list[int], lookback_days: int) -> str:
+    items = news_state.get("items") or []
+    if not items:
+        lines = [f"📰 Related news · note #{note_id}",
+                 f"No closely related news found from the last {lookback_days} days."]
+        lines.extend(f"• {w}" for w in news_state.get("warnings") or [])
+        return "\n".join(lines)
+    lines = [f"📰 Related news · note #{note_id} (last {lookback_days} days; headlines only, "
+             "the bot has not read the articles)"]
+    for n, item in enumerate(items, 1):
         meta = ", ".join(x for x in (item.get("source"), item.get("published")) if x)
-        lines.append(f"{n}. {item['title']}" + (f" ({meta})" if meta else ""))
+        used = " · used in draft" if (n - 1) in used_ids else ""
+        lines.append(f"{n}. {item['title']}" + (f" ({meta})" if meta else "") + used)
+        if item.get("why"):
+            lines.append(f"   Why: {item['why']}")
         lines.append(f"   {item['link']}")
     lines.append("Open and read each article before relying on it.")
     return "\n".join(lines)

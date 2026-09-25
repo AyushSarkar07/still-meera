@@ -48,7 +48,8 @@ def test_high_score_note_is_drafted_and_delivered(env):
     texts = [m["text"] for m in tg.sent]
     assert texts[0].startswith("📝 Still Meera · note #1")
     assert texts[1] == fakes.SAMPLE_DRAFT["post"]          # draft alone, easy to copy
-    assert texts[2].startswith("🔗 Sources") and "example.com/sample-headline-1" in texts[2]
+    assert texts[2].startswith("📰 Related news · note #1") and "example.com/sample-headline-1" in texts[2]
+    assert "used in draft" in texts[2] and "Why: [MOCK]" in texts[2]
     assert texts[3].startswith("✅ Check before publishing")
     assert "Retailer meeting details may be confidential" in texts[3]
 
@@ -62,7 +63,8 @@ def test_low_score_note_is_held_and_preserved(env):
     assert note["original_text"] == fakes.SAMPLE_WEAK_NOTE
     assert note["triage_json"]["decision"] == "hold"
     assert ai.calls["draft"] == 0
-    assert len(tg.sent) == 1 and "held" in tg.sent[0]["text"] and "/draft 1" in tg.sent[0]["text"]
+    assert "held" in tg.sent[0]["text"] and "/draft 1" in tg.sent[0]["text"]
+    assert len(tg.sent) == 2 and tg.sent[1]["text"].startswith("📰 Related news")  # held notes get news too
 
 
 def test_threshold_is_configurable_and_applied_by_app_not_model(env):
@@ -232,7 +234,7 @@ def test_draft_failure_resumes_without_repeating_triage(env):
     clock.t += 3600
     pipe.run_due_retries()
     assert store.get_note(1)["status"] == Status.DELIVERED
-    assert ai.calls == {"transcribe": 0, "triage": 1, "draft": 2}
+    assert ai.calls == {"transcribe": 0, "triage": 1, "pick_news": 1, "draft": 2}
 
 
 def test_manual_retry_command_gives_one_more_attempt(env):
@@ -322,3 +324,73 @@ def test_unknown_command_gets_help_reply(env):
     assert pipe.handle_update(post(1, 10, text="/drafts please")) == "ignored_unknown_command"
     assert "commands" in tg.sent[-1]["text"] and store.list_notes() == []
     assert pipe.handle_update(post(2, 11, text="/draft")) == "command_draft_missing_number"
+
+
+# ---------------------------------------------------------------- relevance and related news
+def test_off_topic_post_scores_zero_without_news_or_draft(env):
+    fetched = []
+    news = lambda terms, **kw: fetched.append(terms) or ([], [])
+    ai = fakes.FakeAI(triage_responses=[fakes.SAMPLE_TRIAGE_OFF_TOPIC])
+    pipe, store, tg, ai, _ = env(ai=ai, news=news)
+    pipe.handle_update(post(1, 10, text=fakes.SAMPLE_OFF_TOPIC_NOTE))
+    note = store.get_note(1)
+    assert note["status"] == Status.HELD
+    assert note["triage_json"]["score"] == 0 and note["triage_json"]["relevant"] is False
+    assert fetched == [] and ai.calls["pick_news"] == 0 and ai.calls["draft"] == 0
+    assert len(tg.sent) == 1 and "not related" in tg.sent[0]["text"] and "0/10" in tg.sent[0]["text"]
+
+
+def test_off_topic_note_can_still_be_forced_to_draft(env):
+    ai = fakes.FakeAI(triage_responses=[fakes.SAMPLE_TRIAGE_OFF_TOPIC])
+    pipe, store, *_ = env(ai=ai)
+    pipe.handle_update(post(1, 10, text=fakes.SAMPLE_OFF_TOPIC_NOTE))
+    pipe.handle_update(post(2, 11, text="/draft 1"))
+    assert store.get_note(1)["status"] == Status.DELIVERED
+
+
+def test_triage_without_relevant_field_counts_as_relevant():
+    t = validate_triage(dict(fakes.SAMPLE_TRIAGE_HIGH))
+    assert t["relevant"] is True and t["score"] == 8
+
+
+def test_only_headlines_judged_related_are_shown(env):
+    headlines = [dict(fakes.SAMPLE_NEWS[0], title=f"[SAMPLE HEADLINE] {i}", link=f"https://example.com/{i}")
+                 for i in range(4)]
+    picks = [{"relevant": [{"id": 2, "why": "[MOCK] closest"}, {"id": 0, "why": "[MOCK] related"}, {"id": 9, "why": "bad"}]}]
+    draft = dict(fakes.SAMPLE_DRAFT, used_news_ids=[1])  # id 1 = second *shown* headline
+    ai = fakes.FakeAI(news_picks=picks, draft_responses=[draft])
+    pipe, store, tg, *_ = env(ai=ai, news=fakes.fake_news(headlines))
+    pipe.handle_update(post(1, 10, text=fakes.SAMPLE_TEXT_NOTE))
+    news_msg = next(m["text"] for m in tg.sent if m["text"].startswith("📰"))
+    assert "example.com/2" in news_msg and "example.com/0" in news_msg
+    assert "example.com/1" not in news_msg and "example.com/3" not in news_msg
+    assert news_msg.index("example.com/2") < news_msg.index("example.com/0")  # most relevant first
+    assert "[SAMPLE HEADLINE] 0 (Sample Trade Press, 2026-09-20) · used in draft" in news_msg
+
+
+def test_no_related_headlines_says_so(env):
+    ai = fakes.FakeAI(news_picks=[{"relevant": []}], draft_responses=[dict(fakes.SAMPLE_DRAFT, used_news_ids=[0])])
+    pipe, store, tg, *_ = env(ai=ai)
+    pipe.handle_update(post(1, 10, text=fakes.SAMPLE_TEXT_NOTE))
+    news_msg = next(m["text"] for m in tg.sent if m["text"].startswith("📰"))
+    assert "No closely related news found from the last 7 days" in news_msg
+    assert store.get_note(1)["draft_json"]["used_news_ids"] == []  # draft only saw related headlines
+
+
+def test_news_relevance_failure_never_blocks_the_draft(env):
+    ai = fakes.FakeAI(news_picks=[AIPermanentError("Gemini API error 400")])
+    pipe, store, tg, *_ = env(ai=ai)
+    pipe.handle_update(post(1, 10, text=fakes.SAMPLE_TEXT_NOTE))
+    assert store.get_note(1)["status"] == Status.DELIVERED
+    news_msg = next(m["text"] for m in tg.sent if m["text"].startswith("📰"))
+    assert "Couldn't check which headlines are related" in news_msg
+
+
+def test_news_is_searched_over_the_last_7_days(env):
+    seen = {}
+    def news(terms, max_items, lookback_days):
+        seen.update(max_items=max_items, lookback_days=lookback_days)
+        return [], []
+    pipe, *_ = env(news=news)
+    pipe.handle_update(post(1, 10, text=fakes.SAMPLE_TEXT_NOTE))
+    assert seen == {"max_items": 15, "lookback_days": 7}

@@ -29,6 +29,10 @@ founders, formulators, retail and beauty-industry peers)?
 - substance: is there enough real material to develop responsibly without inventing details?
 
 Rules:
+- relevant: false if the post has nothing to do with skincare, beauty, Skinstinct, or Meera's \
+work as a founder (e.g. "hello", "test", greetings, small talk, random chat). Then score 0, \
+all criteria 0, news_search_terms empty, and say briefly in reason that it is not related. \
+A short or vague post that IS about her field is relevant (score it low instead).
 - A high score means "worth drafting", NOT that any scientific claim is verified.
 - risk_flags.unsupported_claims: list every efficacy, safety, medical, or scientific claim \
 in the note that would need a source before publishing. Empty list if none.
@@ -44,6 +48,28 @@ Return JSON only."""
 
 def triage_user(note_text: str) -> str:
     return f"Meera's note (verbatim):\n<<<\n{note_text}\n>>>"
+
+
+NEWS_PICK_SYSTEM = """You pick which recent news headlines are genuinely related to a note by \
+Meera, founder of the skincare brand Skinstinct. You only see headline metadata (title, source, \
+date), not the articles.
+
+Rules:
+- Keep a headline only if its topic clearly connects to the specific subject of the note \
+(the same ingredient, product type, claim, regulation, market or business issue). Being about \
+skincare or beauty in general is NOT enough.
+- Order the kept headlines from most to least relevant. Keeping none is a normal outcome.
+- why: one short sentence on how the headline connects to the note, based only on the headline. \
+Do not guess what the article says.
+Return JSON only."""
+
+
+def news_pick_user(note_text: str, news: list[dict]) -> str:
+    lines = [
+        f"id={i} | {n['title']} | {n.get('source') or 'unknown source'} | {n.get('published') or 'date unknown'}"
+        for i, n in enumerate(news)
+    ]
+    return f"NOTE (verbatim):\n<<<\n{note_text}\n>>>\n\nHEADLINES:\n" + "\n".join(lines)
 
 
 @lru_cache(maxsize=1)

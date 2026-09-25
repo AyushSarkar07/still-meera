@@ -1,5 +1,8 @@
 """Core workflow: route an update, then transcribe → triage → news → draft → deliver.
 
+Off-topic posts stop after triage (score 0). Every relevant post gets a related-news
+message, whether it is drafted or held.
+
 Every stage stores its output on the note row before moving on, so a retry resumes
 from the failed stage and never pays twice for work that already succeeded.
 """
@@ -100,7 +103,7 @@ class Pipeline:
         if (origin.get("sender_user") or {}).get("is_bot") or (post.get("forward_from") or {}).get("is_bot"):
             return True
         text = (post.get("text") or "").strip()
-        if text.startswith(("📝 Still Meera", "⏸ Still Meera", "⚠️ Still Meera", "🔗 Sources for note",
+        if text.startswith(("📝 Still Meera", "⏸ Still Meera", "⚠️ Still Meera", "🔗 Sources for note", "📰 Related news",
                             "✅ Check before publishing", "ℹ️ Still Meera")):
             return True
         # A draft reposted verbatim should not become a new note.
@@ -167,22 +170,25 @@ class Pipeline:
             qualifies = triage["score"] >= self.cfg.triage_threshold
             triage["decision"] = "develop" if qualifies else "hold"
             self.store.update_note(note_id, triage_json=triage)
+            if not triage.get("relevant", True) and not force:
+                # Not about her field at all ("hello"): no news search, no draft.
+                self.store.update_note(note_id, status=Status.HELD, last_error=None, stage=None)
+                stage = "deliver"
+                self._send(note_id, formatter.off_topic_message(note_id, triage, note["kind"]))
+                return Status.HELD
+
+            # 3. related news for every relevant note (optional context; never blocks drafting)
+            news_state = note.get("news_json")
+            if not isinstance(news_state, dict):
+                news_state = self._find_news(text, triage)
+                self.store.update_note(note_id, news_json=news_state)
+
             if not qualifies and not force:
                 self.store.update_note(note_id, status=Status.HELD, last_error=None, stage=None)
                 stage = "deliver"
                 self._send(note_id, formatter.held_message(note_id, triage, self.cfg.triage_threshold, note["kind"]))
+                self._send_news(note_id, news_state, [])
                 return Status.HELD
-
-            # 3. news (optional context; failure never blocks drafting)
-            news_state = note.get("news_json")
-            if not isinstance(news_state, dict):
-                items, warnings = self.news_fetcher(triage.get("news_search_terms", []),
-                                                    max_items=self.cfg.news_max_items,
-                                                    lookback_days=self.cfg.news_lookback_days)
-                if not triage.get("news_search_terms"):
-                    warnings = warnings + ["No search terms suggested; drafted without news."]
-                news_state = {"items": items, "warnings": warnings}
-                self.store.update_note(note_id, news_json=news_state)
 
             # 4. draft
             draft = note.get("draft_json")
@@ -203,15 +209,35 @@ class Pipeline:
             log.exception("Unexpected error on note %s", note_id)
             return self._record_failure(note_id, stage, exc, force_permanent=True)
 
+    def _find_news(self, text: str, triage: dict) -> dict:
+        """Fetch recent headlines, then keep only those Gemini judges related to the note."""
+        terms = triage.get("news_search_terms", [])
+        if not terms:
+            return {"items": [], "warnings": ["No search terms suggested, so no news lookup."]}
+        candidates, warnings = self.news_fetcher(terms, max_items=self.cfg.news_candidates,
+                                                 lookback_days=self.cfg.news_lookback_days)
+        if not candidates:
+            return {"items": [], "warnings": warnings, "candidates": 0}
+        try:
+            picks = self.ai.pick_news(text, candidates)[: self.cfg.news_max_items]
+        except AIError as exc:
+            log.warning("News relevance check failed: %s", exc)
+            return {"items": [], "candidates": len(candidates),
+                    "warnings": warnings + ["Couldn't check which headlines are related, so none are shown."]}
+        items = [dict(candidates[p["id"]], why=p["why"]) for p in picks]
+        return {"items": items, "warnings": warnings, "candidates": len(candidates)}
+
+    def _send_news(self, note_id: int, news_state: dict, used_ids: list[int]) -> None:
+        msg = formatter.news_message(note_id, news_state, used_ids, self.cfg.news_lookback_days)
+        for chunk in formatter.split_text(msg):
+            self._send(note_id, chunk)
+
     def _deliver(self, note_id: int, kind: str, triage: dict, draft: dict, news_state: dict) -> None:
         self._send(note_id, formatter.score_message(note_id, triage, self.cfg.triage_threshold, kind))
         chunks = formatter.label_parts(formatter.split_text(draft["post"]), "draft")
         for chunk in chunks:
             self._send(note_id, chunk)
-        src = formatter.sources_message(note_id, news_state["items"], draft["used_news_ids"])
-        if src:
-            for chunk in formatter.split_text(src):
-                self._send(note_id, chunk)
+        self._send_news(note_id, news_state, draft["used_news_ids"])
         check = formatter.check_message(note_id, triage, draft, news_state.get("warnings", []),
                                         news_used=bool(draft["used_news_ids"]))
         for chunk in formatter.split_text(check):

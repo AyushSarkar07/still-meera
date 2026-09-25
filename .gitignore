@@ -5,3 +5,6 @@ data/
 __pycache__/
 .pytest_cache/
 voice/source/*.pdf
+.vercel
+.env*
+!.env.example

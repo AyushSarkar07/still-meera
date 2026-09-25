@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import itertools
 
-from .gemini import validate_draft, validate_triage
+from .gemini import validate_draft, validate_news_pick, validate_triage
 
 
 class FakeTelegram:
@@ -37,11 +37,12 @@ class FakeTelegram:
 class FakeAI:
     """Scripted responses. Pass callables or exceptions per call to simulate failures."""
 
-    def __init__(self, triage_responses=None, draft_responses=None, transcripts=None):
+    def __init__(self, triage_responses=None, draft_responses=None, transcripts=None, news_picks=None):
         self.triage_responses = list(triage_responses or [])
+        self.news_picks = list(news_picks or [])  # default: every headline judged related
         self.draft_responses = list(draft_responses or [])
         self.transcripts = list(transcripts or [])
-        self.calls = {"transcribe": 0, "triage": 0, "draft": 0}
+        self.calls = {"transcribe": 0, "triage": 0, "pick_news": 0, "draft": 0}
 
     def _next(self, queue, default):
         item = queue.pop(0) if queue else default
@@ -56,6 +57,11 @@ class FakeAI:
     def triage(self, note_text: str) -> dict:
         self.calls["triage"] += 1
         return validate_triage(self._next(self.triage_responses, SAMPLE_TRIAGE_HIGH))
+
+    def pick_news(self, note_text: str, news: list[dict]) -> list[dict]:
+        self.calls["pick_news"] += 1
+        default = {"relevant": [{"id": i, "why": "[MOCK] Same topic as the note."} for i in range(len(news))]}
+        return validate_news_pick(self._next(self.news_picks, default), len(news))
 
     def draft(self, note_text: str, triage: dict, news: list[dict]) -> dict:
         self.calls["draft"] += 1
@@ -97,6 +103,14 @@ SAMPLE_TRIAGE_LOW = {
     "missing_information": ["Which trend?", "What did you notice or disagree with?"],
     "risk_flags": {"unsupported_claims": [], "private_customer_info": []},
     "news_search_terms": [],
+}
+SAMPLE_OFF_TOPIC_NOTE = "[SAMPLE NOTE] hello"
+SAMPLE_TRIAGE_OFF_TOPIC = {
+    "relevant": False, "score": 2, "decision": "hold",  # the app forces 0 when relevant is false
+    "reason": "[MOCK] A greeting, not related to skincare or Skinstinct.",
+    "criteria": {"clarity": 5, "audience_relevance": 0, "specificity": 0, "substance": 0},
+    "missing_information": [], "risk_flags": {"unsupported_claims": [], "private_customer_info": []},
+    "news_search_terms": ["hello"],
 }
 SAMPLE_DRAFT = {
     "post": (
