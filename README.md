@@ -10,7 +10,7 @@ Telegram channel post ─► (voice? download + Gemini transcription)
                       ─► Gemini triage 0–10 ──► below threshold: held + reason (note kept)
                                             └─► Google News RSS headlines (optional)
                                                 ─► Gemini draft in Meera's voice
-                                                ─► Telegram: score · draft · sources · check before publishing
+                                                ─► Telegram: score · draft · related news · check before publishing
 ```
 
 ## Mac setup (one time)
@@ -71,7 +71,7 @@ so a restart does not reprocess anything.
 
 **First live test:** in the channel, post a text note such as
 *"Test: a customer asked why our cleanser has no fragrance. I want to explain how we decide what not to add."*
-Within about a minute you should see four messages: score, draft, (sources, if a headline was used),
+Within about a minute you should see four messages: score, draft, related news,
 and "Check before publishing". Then try a short voice note.
 
 ### Commands you can post in the channel
@@ -162,9 +162,14 @@ or Gemini integration. Do that with the first live test above.
   (`unsupported_claims` and `private_customer_info`, kept separate) and `news_search_terms`.
   The app, not the model, applies the threshold. A high score is not a fact-check.
 - **Held notes** are kept in SQLite with their reason and can be drafted later with `/draft N`.
-- **News** comes from Google News RSS: title, source, date and link only. The bot never reads the
-  articles and says so. If nothing genuinely relates, the draft has no news hook. Only headlines
-  the draft actually used are listed as sources.
+- **Off-topic posts** ("hello", "test", small talk) are marked not related, scored **0**, and get
+  one short reply. No news search and no draft. `/draft N` still forces a draft if it was meant as a note.
+- **Related news** is sent for every relevant note, drafted or held, as a "📰 Related news" message.
+  The bot searches Google News RSS over the last 7 days (`NEWS_LOOKBACK_DAYS`), then Gemini keeps
+  only headlines that clearly connect to the note, most relevant first, each with a one-line reason.
+  If none do, the message says so. The draft only sees those related headlines and may use none;
+  any it used are marked "used in draft". Headlines only (title, source, date, link). The bot
+  never reads the articles.
 - **Voice.** Telegram voice notes (OGG/Opus) are downloaded through the Bot API (20 MB bot limit)
   and transcribed by Gemini. Telegram does not supply transcripts to bots.
 - **Retries and cost.** Each step's result is saved before the next one starts, so a retry

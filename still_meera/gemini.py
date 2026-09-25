@@ -1,4 +1,4 @@
-"""Gemini calls: transcription, triage, drafting.
+"""Gemini calls: transcription, triage, news relevance, drafting.
 
 Uses the google-genai SDK Interactions API (`client.interactions.create`), which
 Google's docs describe as generally available and recommended for new projects
@@ -36,12 +36,14 @@ class MalformedAIResponse(AIError):
 class AIClient(Protocol):
     def transcribe(self, audio: bytes, mime_type: str) -> str: ...
     def triage(self, note_text: str) -> dict: ...
+    def pick_news(self, note_text: str, news: list[dict]) -> list[dict]: ...
     def draft(self, note_text: str, triage: dict, news: list[dict]) -> dict: ...
 
 
 TRIAGE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
+        "relevant": {"type": "boolean"},
         "score": {"type": "number", "minimum": 0, "maximum": 10},
         "decision": {"type": "string", "enum": ["develop", "hold"]},
         "reason": {"type": "string"},
@@ -66,7 +68,23 @@ TRIAGE_SCHEMA: dict[str, Any] = {
         },
         "news_search_terms": {"type": "array", "items": {"type": "string"}},
     },
-    "required": ["score", "decision", "reason", "missing_information", "risk_flags", "news_search_terms"],
+    "required": ["relevant", "score", "decision", "reason", "missing_information", "risk_flags",
+                 "news_search_terms"],
+}
+
+NEWS_PICK_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "relevant": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {"id": {"type": "integer"}, "why": {"type": "string"}},
+                "required": ["id", "why"],
+            },
+        },
+    },
+    "required": ["relevant"],
 }
 
 DRAFT_SCHEMA: dict[str, Any] = {
@@ -95,18 +113,41 @@ def validate_triage(data: Any) -> dict:
     flags = data.get("risk_flags") or {}
     if not isinstance(flags, dict):
         flags = {}
+    # Off-topic posts ("hello", tests, chat) score 0, applied by the app, not left to the model.
+    relevant = data.get("relevant") is not False
+    criteria = data.get("criteria") or {}
+    if not relevant:
+        score = 0.0
+        criteria = {k: 0 for k in ("clarity", "audience_relevance", "specificity", "substance")}
     return {
+        "relevant": relevant,
         "score": round(score, 1),
         "decision": data.get("decision"),  # overwritten by the pipeline using the threshold
         "reason": reason.strip(),
-        "criteria": data.get("criteria") or {},
+        "criteria": criteria,
         "missing_information": _str_list(data.get("missing_information")),
         "risk_flags": {
             "unsupported_claims": _str_list(flags.get("unsupported_claims")),
             "private_customer_info": _str_list(flags.get("private_customer_info")),
         },
-        "news_search_terms": _str_list(data.get("news_search_terms"))[:3],
+        "news_search_terms": _str_list(data.get("news_search_terms"))[:3] if relevant else [],
     }
+
+
+def validate_news_pick(data: Any, news_count: int) -> list[dict]:
+    """Returns [{"id", "why"}] for headlines judged relevant, most relevant first."""
+    if not isinstance(data, dict) or not isinstance(data.get("relevant"), list):
+        raise MalformedAIResponse("News relevance response had no 'relevant' list")
+    picks, seen = [], set()
+    for p in data["relevant"]:
+        if not isinstance(p, dict):
+            continue
+        i = p.get("id")
+        # Only keep ids that point at headlines we actually supplied.
+        if isinstance(i, int) and 0 <= i < news_count and i not in seen:
+            seen.add(i)
+            picks.append({"id": i, "why": str(p.get("why") or "").strip()})
+    return picks
 
 
 def validate_draft(data: Any, news_count: int) -> dict:
@@ -181,6 +222,14 @@ class GeminiClient:
             response_format={"type": "text", "mime_type": "application/json", "schema": TRIAGE_SCHEMA},
         )
         return validate_triage(parse_json(text))
+
+    def pick_news(self, note_text: str, news: list[dict]) -> list[dict]:
+        text = self._create(
+            system_instruction=prompts.NEWS_PICK_SYSTEM,
+            input=prompts.news_pick_user(note_text, news),
+            response_format={"type": "text", "mime_type": "application/json", "schema": NEWS_PICK_SCHEMA},
+        )
+        return validate_news_pick(parse_json(text), len(news))
 
     def draft(self, note_text: str, triage: dict, news: list[dict]) -> dict:
         text = self._create(
